@@ -1,18 +1,14 @@
 // Package daemon 实现 Vagabond 的传输宿主：双 unix socket 监听 + 客户端连接管理。
 //
 // daemon 拥有两个 socket（Rule 4）：api.sock（JSON API，agent/CLI 用）与
-// client.sock（二进制字节流，UI 用）。骨架阶段两者一视同仁，都只做 protocol
-// 的版本握手 + framing，不解析 payload（payload 语义交给未来上层 internal/api
-// 与 render）。
+// client.sock（二进制字节流，UI 用）。握手后按 socket 类型分发：api socket 的
+// payload 交给注入的 APIHandler（internal/api，应用层）；client socket 的字节流
+// 暂走骨架（pty 批次接入）。daemon 自身不解析 payload（Project Map）。
 //
-// daemon 不持有业务状态（AppState 属于 internal/state，后续批次注入），也不做
-// 路由或协调决策（Rule 8）。连接生命周期用 context 管理（Rule 7）：每个连接
-// 一个 goroutine，客户端断开只清理自己的资源，不影响 daemon 或其他连接。
-//
-// 演进路径（不在本骨架实现）：未来 internal/state 接入时，AppState 只被一个核心
-// goroutine 持有（Rule 1），届时连接 worker 将从"自处理读帧"改为"通过 channel
-// 向核心 goroutine 发送帧/连接事件"，AppState 绝不被 worker 直接修改。本骨架的
-// accept + per-conn worker 框架保留，是增量演进而非重写。
+// Rule 1：daemon 不持有业务状态（AppState 属于 internal/state），api 请求经
+// APIHandler → state.Core.Send/Snapshot，连接 worker 绝不直接改 state。
+// Rule 8：daemon 不做路由或协调决策。Rule 7：每连接一个 goroutine，客户端断开
+// 只清自己的资源，不影响 daemon 或其他连接。
 package daemon
 
 import (
@@ -33,6 +29,21 @@ const (
 	clientSocketName = "client.sock"
 )
 
+// APIHandler 处理 api socket 的 payload（JSON 请求）并返回响应 payload。
+// daemon 不解析 payload（Project Map：payload 语义交给 internal/api）。
+// 注入后（WithAPI）api socket 走请求-响应循环；未注入则与 client socket 一样读帧丢弃。
+type APIHandler interface {
+	Handle(ctx context.Context, payload []byte) (response []byte, err error)
+}
+
+// connKind 标识连接来自哪个 socket，决定握手后的分发路径。
+type connKind int
+
+const (
+	kindAPI    connKind = iota // api.sock：JSON 请求-响应
+	kindClient                 // client.sock：二进制字节流（pty 批次接入）
+)
+
 // Daemon 是 Vagabond 的传输宿主，持有双 socket listener。
 // 零值不可用，必须通过 Listen 创建。
 type Daemon struct {
@@ -41,6 +52,7 @@ type Daemon struct {
 	apiPath        string
 	clientPath     string
 	logger         *slog.Logger
+	api            APIHandler // 注入后 api socket 走请求-响应；nil 则读帧丢弃
 
 	closeOnce sync.Once
 	closeErr  error
@@ -84,6 +96,12 @@ func (d *Daemon) WithLogger(l *slog.Logger) *Daemon {
 	return d
 }
 
+// WithAPI 注入 api socket 的处理器；应在 Serve 前调用。
+func (d *Daemon) WithAPI(h APIHandler) *Daemon {
+	d.api = h
+	return d
+}
+
 // SocketPaths 返回 api 与 client socket 的磁盘路径，主要供测试与诊断用。
 func (d *Daemon) SocketPaths() (api, client string) {
 	return d.apiPath, d.clientPath
@@ -95,7 +113,7 @@ func (d *Daemon) SocketPaths() (api, client string) {
 func (d *Daemon) Serve(ctx context.Context) error {
 	var wg sync.WaitGroup
 
-	accept := func(lis net.Listener) {
+	accept := func(lis net.Listener, kind connKind) {
 		defer wg.Done()
 		for {
 			conn, err := lis.Accept()
@@ -105,14 +123,14 @@ func (d *Daemon) Serve(ctx context.Context) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				d.handleConn(ctx, conn)
+				d.handleConn(ctx, conn, kind)
 			}()
 		}
 	}
 
 	wg.Add(2)
-	go accept(d.apiListener)
-	go accept(d.clientListener)
+	go accept(d.apiListener, kindAPI)
+	go accept(d.clientListener, kindClient)
 
 	<-ctx.Done()
 	_ = d.Close() // 关闭 listener → accept 循环退出；错误无意义（关停路径）
@@ -120,11 +138,11 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	return nil
 }
 
-// handleConn 在单个连接上执行握手 + 读帧循环（骨架丢弃 payload）。
-// 内置 ctx watcher：ctx 取消时关连接，让阻塞的 ReadFrame 报错退出；
+// handleConn 在单个连接上执行握手 + 按 socket 类型分发。
+// 内置 ctx watcher：ctx 取消时关连接，让阻塞的读写报错退出；
 // 连接正常结束时 watcher 经 done 信号无泄漏退出。
 // 所有错误在内部消化，绝不向上传播（Rule 7：客户端断开只清自己）。
-func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
+func (d *Daemon) handleConn(ctx context.Context, conn net.Conn, kind connKind) {
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -142,11 +160,38 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		d.logger.Debug("daemon: handshake failed", "addr", conn.RemoteAddr(), "err", err)
 		return
 	}
+	if kind == kindAPI && d.api != nil {
+		d.serveAPI(ctx, conn)
+	} else {
+		d.servePassthrough(conn)
+	}
+}
+
+// serveAPI 跑 api socket 的请求-响应循环：读帧 → APIHandler.Handle → 回响应帧。
+// handler 返回 err（严重错误，如响应序列化失败）或读写失败时关连接。
+func (d *Daemon) serveAPI(ctx context.Context, conn net.Conn) {
 	for {
-		if _, err := protocol.ReadFrame(conn); err != nil {
+		payload, err := protocol.ReadFrame(conn)
+		if err != nil {
 			return // 对端关闭 / 出错 / 超长帧
 		}
-		// 骨架阶段丢弃 payload；未来上层按 socket 类型分发（api JSON / client 字节流）。
+		resp, err := d.api.Handle(ctx, payload)
+		if err != nil {
+			return // 严重错误，关连接
+		}
+		if err := protocol.WriteFrame(conn, resp); err != nil {
+			return
+		}
+	}
+}
+
+// servePassthrough 读帧丢弃：client socket 字节流骨架（pty 批次接入），
+// 以及 api socket 未注入 handler 时的兜底。阻塞读受 handleConn 的 ctx watcher 保护。
+func (d *Daemon) servePassthrough(conn net.Conn) {
+	for {
+		if _, err := protocol.ReadFrame(conn); err != nil {
+			return
+		}
 	}
 }
 
