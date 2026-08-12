@@ -1,0 +1,9 @@
+# golangci-lint 配置（v2 格式）。
+# 默认 linters（govet/errcheck/staticcheck/ineffassign 等）+ gosec（安全兜底：
+# 路径穿越、命令注入、弱加密等）。
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - gosec
