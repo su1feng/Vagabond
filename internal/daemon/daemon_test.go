@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -12,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/su1feng/Vagabond/internal/api"
 	"github.com/su1feng/Vagabond/internal/platform"
 	"github.com/su1feng/Vagabond/internal/protocol"
+	"github.com/su1feng/Vagabond/internal/state"
 )
 
 // startDaemon 在临时运行时目录监听并后台 Serve；cancel 或测试结束自动关停。
@@ -286,5 +289,145 @@ func TestDoubleCloseIdempotent(t *testing.T) {
 	}
 	if err := d.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// startDaemonWithAPI 启动注入了 api.Handler（绑定新 Core）的 daemon，供端到端测试。
+func startDaemonWithAPI(t *testing.T) (*Daemon, *state.Core) {
+	t.Helper()
+	t.Setenv("VAGABOND_RUNTIME_DIR", t.TempDir())
+	core := state.New()
+	t.Cleanup(core.Stop)
+	d, err := Listen()
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	d.WithAPI(api.New(core))
+	ctx, cancelFn := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = d.Serve(ctx); close(done) }()
+	t.Cleanup(func() {
+		cancelFn()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("Serve did not exit within 3s after cancel")
+		}
+		_ = d.Close()
+	})
+	return d, core
+}
+
+// dialAPI 连上 api socket 并完成握手。
+func dialAPI(t *testing.T) net.Conn {
+	t.Helper()
+	conn, err := net.Dial("unix", socketPath(t, apiSocketName))
+	if err != nil {
+		t.Fatalf("Dial api.sock: %v", err)
+	}
+	if err := protocol.NegotiateClient(conn, protocol.ProtocolVersion); err != nil {
+		_ = conn.Close()
+		t.Fatalf("NegotiateClient: %v", err)
+	}
+	return conn
+}
+
+// apiRequest 在已握手的连接上发 JSON 请求并读回响应（端到端测试辅助）。
+func apiRequest(t *testing.T, conn net.Conn, req string) api.Response {
+	t.Helper()
+	if err := protocol.WriteFrame(conn, []byte(req)); err != nil {
+		t.Fatalf("write %q: %v", req, err)
+	}
+	payload, err := protocol.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read response for %q: %v", req, err)
+	}
+	var resp api.Response
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal response for %q: %v (raw=%s)", req, err, payload)
+	}
+	return resp
+}
+
+func TestAPISocketSnapshotEndToEnd(t *testing.T) {
+	// 端到端 Rule 1：客户端 → daemon api socket → api.Handler → Core.Snapshot → 响应。
+	_, core := startDaemonWithAPI(t)
+	core.Send(state.AddWorkspace{ID: "w1"})
+	core.Send(state.NewTab{WorkspaceID: "w1", ID: "t1"})
+	core.Send(state.NewPane{WorkspaceID: "w1", TabID: "t1", ID: "p1", Cwd: "/demo"})
+
+	conn := dialAPI(t)
+	defer conn.Close()
+
+	resp := apiRequest(t, conn, `{"method":"snapshot"}`)
+	if !resp.OK || resp.State == nil {
+		t.Fatalf("resp: %+v", resp)
+	}
+	if len(resp.State.Workspaces) != 1 || resp.State.Workspaces[0].Tabs[0].Panes[0].ID != "p1" {
+		t.Fatalf("state mismatch: %+v", resp.State)
+	}
+}
+
+func TestAPISocketWriteEndToEnd(t *testing.T) {
+	startDaemonWithAPI(t)
+	conn := dialAPI(t)
+	defer conn.Close()
+
+	// 客户端发写请求 → 各 OK=true（fire-and-forget 投递成功）。
+	for _, r := range []string{
+		`{"method":"add-workspace","id":"w1"}`,
+		`{"method":"new-tab","workspace":"w1","id":"t1"}`,
+		`{"method":"new-pane","workspace":"w1","tab":"t1","id":"p1","cwd":"/x"}`,
+		`{"method":"set-pane-agent","workspace":"w1","tab":"t1","pane":"p1","agent":"codex-1"}`,
+	} {
+		if resp := apiRequest(t, conn, r); !resp.OK {
+			t.Fatalf("write %q: %+v", r, resp)
+		}
+	}
+	// snapshot 验证端到端写生效。
+	resp := apiRequest(t, conn, `{"method":"snapshot"}`)
+	p := resp.State.Workspaces[0].Tabs[0].Panes[0]
+	if p.ID != "p1" || p.Cwd != "/x" || p.AgentRef != "codex-1" {
+		t.Fatalf("pane after writes: %+v", p)
+	}
+}
+
+func TestAPISocketErrorResponses(t *testing.T) {
+	startDaemonWithAPI(t)
+	conn := dialAPI(t)
+	defer conn.Close()
+
+	// 未知 method → OK=false + error。
+	if resp := apiRequest(t, conn, `{"method":"frobnicate"}`); resp.OK {
+		t.Fatal("expected OK=false for unknown method")
+	}
+	// 无效 JSON → OK=false + error。
+	if resp := apiRequest(t, conn, `not json`); resp.OK {
+		t.Fatal("expected OK=false for invalid json")
+	}
+	// 连接仍可用：后续 snapshot 正常返回。
+	if resp := apiRequest(t, conn, `{"method":"snapshot"}`); !resp.OK {
+		t.Fatalf("connection unusable after error responses: %+v", resp)
+	}
+}
+
+func TestClientSocketIsPassthrough(t *testing.T) {
+	// 即使注入了 api，client socket 也走 servePassthrough（不响应 JSON）。
+	startDaemonWithAPI(t)
+	conn, err := net.Dial("unix", socketPath(t, clientSocketName))
+	if err != nil {
+		t.Fatalf("Dial client.sock: %v", err)
+	}
+	defer conn.Close()
+	if err := protocol.NegotiateClient(conn, protocol.ProtocolVersion); err != nil {
+		t.Fatalf("NegotiateClient: %v", err)
+	}
+	// 发一个看起来像 api 请求的帧，servePassthrough 应丢弃、不回。
+	if err := protocol.WriteFrame(conn, []byte(`{"method":"snapshot"}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, err := protocol.ReadFrame(conn); err == nil {
+		t.Fatal("client socket should not respond (passthrough), got a response")
 	}
 }
