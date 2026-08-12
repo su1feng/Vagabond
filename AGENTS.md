@@ -55,6 +55,7 @@ go test ./...     # 全量测试
 
 ## Git & PR
 
+- **不主动合并到 main**：只提 PR（`gh pr create`），合并到 main（`gh pr merge` / `git merge main` / `git push main`）一律由人决定，agent 绝不自动执行。
 - Conventional Commits（feat: / fix: / docs: / test: / chore:），主题描述性、聚焦单一改动。
 - 不加 co-author，不透露 agent 身份。
 - 一轮 review 反馈一次 force-push；review 反馈用 amend 而不是追加 commit。
