@@ -5,11 +5,11 @@
 // 的版本握手 + framing，不解析 payload（payload 语义交给未来上层 internal/api
 // 与 render）。
 //
-// daemon 不持有业务状态（AppState 属于 internal/app，后续批次注入），也不做
+// daemon 不持有业务状态（AppState 属于 internal/state，后续批次注入），也不做
 // 路由或协调决策（Rule 8）。连接生命周期用 context 管理（Rule 7）：每个连接
 // 一个 goroutine，客户端断开只清理自己的资源，不影响 daemon 或其他连接。
 //
-// 演进路径（不在本骨架实现）：未来 internal/app 接入时，AppState 只被一个核心
+// 演进路径（不在本骨架实现）：未来 internal/state 接入时，AppState 只被一个核心
 // goroutine 持有（Rule 1），届时连接 worker 将从"自处理读帧"改为"通过 channel
 // 向核心 goroutine 发送帧/连接事件"，AppState 绝不被 worker 直接修改。本骨架的
 // accept + per-conn worker 框架保留，是增量演进而非重写。
