@@ -6,9 +6,9 @@
 
 ## 背景（Context）
 
-5 种协作模式对 worktree 的需求不同：
+5 种协作场景对 worktree 的需求不同（场景定义见 [collab-modes](../design/collab-modes.md)，下表沿用其五场景分类）：
 
-| 协作模式 | 接收/协作方状态 | worktree 倾向 |
+| 协作场景 | 接收/协作方状态 | worktree 倾向 |
 |---|---|---|
 | ① 任务分工（并行研究） | 活跃 | 共享（顺序写）或隔离（并行） |
 | ② 代码评审 | idle | 共享（评审当前树） |
@@ -60,7 +60,7 @@
 
 ## 结果（Consequences）
 
-- 优点：覆盖全部 5 种协作模式；merge 策略不锁死；worktree 安全（preserve-ref）。
+- 优点：覆盖全部 5 种协作场景；merge 策略不锁死；worktree 安全（preserve-ref）。
 - 代价：共享模式下需防止 agent 互相踩（参考 OpenHarness 的 prompt 纪律，或文件级协调）；隔离模式需沙箱（见 [ADR 0005](0005-isolation-sandbox.md)）。
 - 共享 vs 隔离的切换：由协作模式驱动（非用户手动选），见 docs/design/collab-modes.md。
 

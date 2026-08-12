@@ -93,6 +93,15 @@ A 拿结果:
 - Task store 的存储结构与清理策略。
 - 同步模式的超时默认值与可配置性。
 
+## 补充：与 coordination state 的关系（2026-08-12）
+
+Task（本 ADR）与 coordination state（[ADR 0010](0010-coordination-state.md)）**互补不重叠**：
+
+- **Task**（本 ADR）= 有生命周期的任务过程（咨询/评审/接力），管"产生结论的对话与执行"。
+- **coordination state** = 持久共享的权威事实（决策/归属/锁/检查点），管"当前的结论本身"。
+
+一次协作里 Task 产出结论 → 落成 coordination state 条目；后续 agent 读 state 拿权威事实，不必翻 Task 历史。Task 内容不落盘（Rule 5 原意），coordination state 落盘（Rule 5 扩展，见 [ADR 0010](0010-coordination-state.md) 论证）。
+
 ## 参考（References）
 
 - A2A spec：Task lifecycle、`SendMessageConfiguration.returnImmediately`、streaming-and-async

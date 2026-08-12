@@ -16,7 +16,7 @@
 2. **daemon 拥有一切，客户端什么都不拥有**：所有状态和 PTY 都在 daemon；TUI/桌面/移动客户端不持有会话状态，重连时从 daemon 重新同步。
 3. **字节流渲染**：daemon 推原始字节流，由客户端渲染；daemon 内部的 VT 翻译器只用于 agent 状态感知（working/blocked/idle），不参与推流。该状态感知同时服务于 wrapper 的注入时机判断（见 Guardrail 9）。
 4. **双 socket**：JSON API socket（agent/CLI 用）与二进制 client socket（UI 用）分离；协议版本用整数递增（PROTOCOL_VERSION）；禁止 protobuf / gob / base64-in-JSON。
-5. **轻量快照**：持久化只存布局 + cwd + agent 会话引用；agent 对话内容绝不落盘，恢复交给 agent 自己的 resume。
+5. **轻量快照**：持久化只存布局 + cwd + agent 会话引用 + 协调状态（coordination state：决策/归属/锁/检查点等机读权威事实）；agent 对话内容绝不落盘，恢复交给 agent 自己的 resume。详见 [ADR 0010](docs/adr/0010-coordination-state.md)。
 6. **等待而不是轮询**：agent 接口的核心是阻塞 wait 原语（idle/ready/exited/blocked + 超时），禁止 sleep-and-poll。
 7. **生命周期用 context**：每个 goroutine 通过 context 取消；客户端断开只清理自己的资源，不影响 daemon。
 8. **wrapper peer-to-peer 协作**：每个 agent 套一个 wrapper goroutine；wrapper 之间直接通信，不走中心 relay。daemon 只提供 wrapper 宿主、终端渲染和 discovery（agent 目录），不做路由或协调决策——协调（谁干啥、谁 review 谁）交给 coordinator agent 或人。
@@ -34,7 +34,7 @@
 - `internal/api/` — JSON API + wait 原语 + 事件订阅。agent 接口只在这一层暴露。
 - `internal/render/` — 视图纯函数 Draw(state, canvas)。只能画，不能改状态。
 - `internal/client/` — bubbletea TUI 前端。不持有会话状态，不直接读 AppState。
-- `internal/persist/` — 轻量快照保存/恢复。不存终端内容。
+- `internal/persist/` — 轻量快照保存/恢复（布局 + cwd + agent 会话引用 + 协调状态）。不存终端内容与对话。
 - `internal/agent/` — Agent 适配器（Start/Stop/Status/SendInput）。适配器是叶子，不反向依赖。
 - `internal/platform/` — 平台能力抽象。平台差异只收敛于此。
 - `internal/wrapper/` — agent wrapper（终端面 PTY 管理 + 端点面 A2A gRPC server + peer 请求→PTY 注入逻辑）。wrapper 是协作的基本单元。
@@ -63,6 +63,6 @@ go test ./...     # 全量测试
 ## Further Docs
 
 - `docs/adr/` — 架构决策记录（每个 Guardrail 的"为什么"，含被排除方案的对比）。
-- `docs/design/` — 详细设计（wrapper 内部结构、5 种协作模式实现、discovery、客户端）。
+- `docs/design/` — 详细设计（wrapper 内部结构、双拓扑协作模型、discovery、客户端）。
 
-> Vagabond 的定位：多 agent 协作平台——同一项目内，异构 agent（codex/reasonix/kimi-code/claude-code 等）以 peer-to-peer 方式协作。支持 5 种协作模式：任务分工、代码评审、专家咨询、接力交接、方案对决。
+> Vagabond 的定位：多 agent 协作平台——同一项目内，异构 agent（codex/reasonix/kimi-code/claude-code 等）以 peer-to-peer 方式协作。协调支持双拓扑（lead 中心化 / peer 去中心化，可切换，见 [ADR 0009](docs/adr/0009-coordination-topology.md)），覆盖 5 种协作场景：任务分工、代码评审、专家咨询、接力交接、方案对决。
