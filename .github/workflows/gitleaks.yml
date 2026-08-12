@@ -13,11 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # 扫全历史，不只当前 commit
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v3
         env:
           # 公开仓库免费；私有仓库需配 GITLEAKS_LICENSE secret。
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
