@@ -7,3 +7,11 @@ linters:
   default: standard
   enable:
     - gosec
+  settings:
+    errcheck:
+      # defer 资源清理（Close/Remove）忽略 err 是 Go 惯例，err 通常无意义。
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Conn).Close
+        - (*os.File).Close
+        - os.Remove

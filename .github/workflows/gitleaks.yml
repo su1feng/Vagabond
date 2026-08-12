@@ -11,10 +11,12 @@ permissions:
 jobs:
   gitleaks:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # 扫全历史，不只当前 commit
+          persist-credentials: false
       - uses: gitleaks/gitleaks-action@v2
         env:
           # 公开仓库免费；私有仓库需配 GITLEAKS_LICENSE secret。
