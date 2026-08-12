@@ -28,7 +28,7 @@
 
 - `cmd/vagabond/` — 入口分发（检测 daemon → 拉起 → attach）。只做分发，不放业务逻辑。
 - `internal/daemon/` — 事件循环 + 双 socket 监听 + 客户端连接管理。daemon 内禁止 UI 渲染逻辑。
-- `internal/app/` — AppState 状态树（workspace/tab/pane）+ 变更动作。状态只归核心 goroutine。
+- `internal/state/` — AppState 状态树（workspace/tab/pane）+ 变更动作。状态只归核心 goroutine。
 - `internal/pty/` — 统一 PTY 接口 + unix（creack/pty）+ windows（ConPTY）。其他模块不得直接依赖平台 pty 库。
 - `internal/protocol/` — 协议编解码（长度前缀 + 版本协商）。数据路径禁止 base64 或逐块 utf8 解码。
 - `internal/api/` — JSON API + wait 原语 + 事件订阅。agent 接口只在这一层暴露。
