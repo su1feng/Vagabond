@@ -12,8 +12,8 @@
 │                                                                    │
 │  终端面                          端点面                             │
 │  ┌───────────────────┐          ┌────────────────────────────┐    │
-│  │ 管理 agent PTY     │          │ A2A gRPC server            │    │
-│  │ (creack/pty)       │          │ over Unix socket           │    │
+│  │ 持有 agent 适配器  │          │ A2A gRPC server            │    │
+│  │ (封装 pty)         │          │ over Unix socket           │    │
 │  │                    │          │ /run/vagabond/<agent>.sock │    │
 │  │ 读 PTY 字节 ───────┼──────────┼─→ 推给 daemon（字节流渲染） │    │
 │  │                    │          │                            │    │
@@ -40,7 +40,7 @@
 ## 三个接口
 
 ### 1. 终端面（PTY）
-- 用 `internal/pty/` 启动 agent 子进程，拿 PTY。
+- 经 `internal/agent/` 启动 agent 子进程（agent 适配器封装 `internal/pty`：agent.Start 内部调 pty.Start）；wrapper 持有 agent 实例，经它读字节流/注入/查状态。
 - 读 PTY 字节 → 推给 daemon（走 channel，Rule 1）→ daemon 推给客户端渲染。
 - VT 翻译器（Rule 3）感知 agent 状态（working/idle/blocked），供注入时机判断。
 
@@ -66,4 +66,4 @@ wrapper 是 goroutine，不直接改 AppState（Rule 1）。通过 channel 与 d
 - [ ] 注入文本格式约定（统一前缀标记，让 agent 识别为 peer 消息而非噪音）。
 - [ ] agent 回应捕获：如何判断 agent 的哪段输出是"对 peer 请求的回答"（VT 状态 idle 边界？特定标记？）。
 - [ ] Task store 在 wrapper 内还是 daemon 内（多 wrapper 共享需在 daemon）。
-- [ ] wrapper 启动/停止生命周期与 agent 进程的绑定。
+- [x] wrapper 启动/停止生命周期与 agent 进程的绑定 → **已决策**：agent 适配器（`internal/agent`）封装 pty，wrapper 持 agent 实例经 `agent.Start/Stop` 管生命周期（PTY 启动归 agent，不归 wrapper 直接调）。
